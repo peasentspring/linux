@@ -38,6 +38,10 @@ static struct clos_cbm_table *cctable;
  */
 unsigned long *closmap;
 /*
+ * Minimum bits required in Cache bitmask.
+ */
+unsigned int min_bitmask_len = 1;
+/*
  * Mask of CPUs for writing CBM values. We only need one CPU per-socket.
  */
 static cpumask_t rdt_cpumask;
@@ -53,6 +57,42 @@ struct rdt_remote_data {
 	int msr;
 	u64 val;
 };
+
+/*
+ * cache_alloc_hsw_probe() - Have to probe for Intel haswell server CPUs
+ * as it does not have CPUID enumeration support for Cache allocation.
+ *
+ * Probes by writing to the high 32 bits(CLOSid) of the IA32_PQR_MSR and
+ * testing if the bits stick. Max CLOSids is always 4 and max cbm length
+ * is always 20 on hsw server parts. The minimum cache bitmask length
+ * allowed for HSW server is always 2 bits. Hardcode all of them.
+ */
+static inline bool cache_alloc_hsw_probe(void)
+{
+	u32 l, h_old, h_new, h_tmp;
+
+	if (rdmsr_safe(MSR_IA32_PQR_ASSOC, &l, &h_old))
+		return false;
+
+	/*
+	 * Default value is always 0 if feature is present.
+	 */
+	h_tmp = h_old ^ 0x1U;
+	if (wrmsr_safe(MSR_IA32_PQR_ASSOC, l, h_tmp) ||
+	    rdmsr_safe(MSR_IA32_PQR_ASSOC, &l, &h_new))
+		return false;
+
+	if (h_tmp != h_new)
+		return false;
+
+	wrmsr_safe(MSR_IA32_PQR_ASSOC, l, h_old);
+
+	boot_cpu_data.x86_cache_max_closid = 4;
+	boot_cpu_data.x86_cache_max_cbm_len = 20;
+	min_bitmask_len = 2;
+
+	return true;
+}
 
 void __intel_rdt_sched_in(void *dummy)
 {
@@ -227,9 +267,6 @@ static int __init intel_rdt_late_init(void)
 	struct cpuinfo_x86 *c = &boot_cpu_data;
 	u32 maxid;
 	int err = 0, size, i;
-
-	if (!cpu_has(c, X86_FEATURE_CAT_L3))
-		return -ENODEV;
 
 	maxid = c->x86_cache_max_closid;
 
