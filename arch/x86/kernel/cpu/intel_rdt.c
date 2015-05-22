@@ -24,6 +24,7 @@
 
 #include <linux/slab.h>
 #include <linux/err.h>
+#include <linux/cpu.h>
 #include <linux/sched.h>
 #include <asm/pqr_common.h>
 #include <asm/intel_rdt.h>
@@ -133,6 +134,9 @@ static inline void msr_update_all(int msr, u64 val)
 	on_each_cpu_mask(&rdt_cpumask, msr_cpu_update, &info, 1);
 }
 
+/*
+ * Set only one cpu in cpumask in all cpus that share the same cache.
+ */
 static inline bool rdt_cpumask_update(int cpu)
 {
 	cpumask_and(&tmp_cpumask, &rdt_cpumask, topology_core_cpumask(cpu));
@@ -142,6 +146,80 @@ static inline bool rdt_cpumask_update(int cpu)
 	}
 
 	return false;
+}
+
+/*
+ * cbm_update_msrs() - Updates all the existing IA32_L3_MASK_n MSRs
+ * which are one per CLOSid on the current package.
+ */
+static void cbm_update_msrs(void *dummy)
+{
+	int maxid = boot_cpu_data.x86_cache_max_closid;
+	struct rdt_remote_data info;
+	unsigned int i;
+
+	for (i = 0; i < maxid; i++) {
+		if (cctable[i].clos_refcnt) {
+			info.msr = CBM_FROM_INDEX(i);
+			info.val = cctable[i].cbm;
+			msr_cpu_update(&info);
+		}
+	}
+}
+
+static int intel_rdt_online_cpu(unsigned int cpu)
+{
+	struct intel_pqr_state *state = &per_cpu(pqr_state, cpu);
+
+	state->closid = 0;
+	mutex_lock(&rdtgroup_mutex);
+	/* The cpu is set in root rdtgroup after online. */
+	cpumask_set_cpu(cpu, &root_rdtgrp->cpu_mask);
+	per_cpu(cpu_rdtgroup, cpu) = root_rdtgrp;
+	/*
+	 * If the cpu is first time found and set in its siblings that
+	 * share the same cache, update the CBM MSRs for the cache.
+	 */
+	if (rdt_cpumask_update(cpu))
+		smp_call_function_single(cpu, cbm_update_msrs, NULL, 1);
+	mutex_unlock(&rdtgroup_mutex);
+}
+
+static int clear_rdtgroup_cpumask(unsigned int cpu)
+{
+	struct list_head *l;
+	struct rdtgroup *r;
+
+	list_for_each(l, &rdtgroup_lists) {
+		r = list_entry(l, struct rdtgroup, rdtgroup_list);
+		if (cpumask_test_cpu(cpu, &r->cpu_mask)) {
+			cpumask_clear_cpu(cpu, &r->cpu_mask);
+			return 0;
+		}
+	}
+
+	return -EINVAL;
+}
+
+static int intel_rdt_offline_cpu(unsigned int cpu)
+{
+	int i;
+
+	mutex_lock(&rdtgroup_mutex);
+	if (!cpumask_test_and_clear_cpu(cpu, &rdt_cpumask)) {
+		mutex_unlock(&rdtgroup_mutex);
+		return;
+	}
+
+	cpumask_and(&tmp_cpumask, topology_core_cpumask(cpu), cpu_online_mask);
+	cpumask_clear_cpu(cpu, &tmp_cpumask);
+	i = cpumask_any(&tmp_cpumask);
+
+	if (i < nr_cpu_ids)
+		cpumask_set_cpu(i, &rdt_cpumask);
+
+	clear_rdtgroup_cpumask(cpu);
+	mutex_unlock(&rdtgroup_mutex);
 }
 
 static int __init intel_rdt_late_init(void)
@@ -172,6 +250,13 @@ static int __init intel_rdt_late_init(void)
 
 	for_each_online_cpu(i)
 		rdt_cpumask_update(i);
+
+	ret = cpuhp_setup_state_nocalls(CPUHP_AP_ONLINE_DYN,
+				"AP_INTEL_RDT_ONLINE",
+				intel_rdt_online_cpu, intel_rdt_offline_cpu);
+	if (err < 0)
+		goto out_err;
+
 	pr_info("Intel cache allocation enabled\n");
 out_err:
 
