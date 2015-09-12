@@ -226,6 +226,26 @@ static inline bool rdt_cpumask_update(int cpu)
 	return false;
 }
 
+static void cbm_update_msr(u32 index)
+{
+	struct rdt_remote_data info;
+	int dindex;
+
+	dindex = DCBM_TABLE_INDEX(index);
+	if (cctable[dindex].clos_refcnt) {
+
+		info.msr = CBM_FROM_INDEX(dindex);
+		info.val = cctable[dindex].cbm;
+		msr_cpu_update((void *) &info);
+
+		if (cdp_enabled) {
+			info.msr = __ICBM_MSR_INDEX(index);
+			info.val = cctable[dindex + 1].cbm;
+			msr_cpu_update((void *) &info);
+		}
+	}
+}
+
 /*
  * cbm_update_msrs() - Updates all the existing IA32_L3_MASK_n MSRs
  * which are one per CLOSid on the current package.
@@ -233,15 +253,10 @@ static inline bool rdt_cpumask_update(int cpu)
 static void cbm_update_msrs(void *dummy)
 {
 	int maxid = cconfig.max_closid;
-	struct rdt_remote_data info;
 	unsigned int i;
 
 	for (i = 0; i < maxid; i++) {
-		if (cctable[i].clos_refcnt) {
-			info.msr = CBM_FROM_INDEX(i);
-			info.val = cctable[i].cbm;
-			msr_cpu_update((void *) &info);
-		}
+		cbm_update_msr(i);
 	}
 }
 
