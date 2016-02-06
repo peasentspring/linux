@@ -941,7 +941,7 @@ static struct hash_testvec sha224_tv_template[] = {
 			  "\xB0\xC6\x45\x5C\xB4\xF5\x8B\x19"
 			  "\x52\x52\x25\x25",
 		.np     = 2,
-		.tap    = { 28, 28 }
+		.tap    = { 28, 28 },
 	}, {
 		.plaintext = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-",
 		.psize	= 64,

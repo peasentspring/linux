@@ -354,8 +354,18 @@ static int __test_hash(struct crypto_ahash *tfm, struct hash_testvec *template,
 			printk(KERN_ERR "alg: hash: Test %d failed for %s\n",
 			       j, algo);
 			hexdump(result, crypto_ahash_digestsize(tfm));
+			printk(KERN_ERR "correct result:\n");
+			hexdump(template[i].digest,
+					crypto_ahash_digestsize(tfm));
 			ret = -EINVAL;
 			goto out;
+		} else {
+			printk(KERN_ERR "alg: hash: Test %d succeed for %s\n",
+			j, algo);
+			hexdump(result, crypto_ahash_digestsize(tfm));
+			printk(KERN_ERR "correct result:\n");
+			hexdump(template[i].digest,
+					crypto_ahash_digestsize(tfm));
 		}
 	}
 
@@ -428,11 +438,15 @@ static int __test_hash(struct crypto_ahash *tfm, struct hash_testvec *template,
 
 		if (memcmp(result, template[i].digest,
 			   crypto_ahash_digestsize(tfm))) {
-			printk(KERN_ERR "alg: hash: Chunking test %d "
-			       "failed for %s\n", j, algo);
+			printk(KERN_ERR "alg: hash: Chunking test %d(%d) "
+					"failed for %s\n", j, i, algo);
 			hexdump(result, crypto_ahash_digestsize(tfm));
 			ret = -EINVAL;
 			goto out;
+		} else {
+			printk(KERN_ERR "alg: hash: Chunking test %d(%d)"
+				" succeed for %s\n", j, i, algo);
+			hexdump(result, crypto_ahash_digestsize(tfm));
 		}
 	}
 
