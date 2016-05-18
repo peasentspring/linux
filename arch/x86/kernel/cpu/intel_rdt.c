@@ -21,6 +21,8 @@
  */
 #include <linux/slab.h>
 #include <linux/err.h>
+#include <linux/sched.h>
+#include <asm/pqr_common.h>
 #include <asm/intel_rdt.h>
 
 /*
@@ -41,11 +43,27 @@ static cpumask_t rdt_cpumask;
  */
 static cpumask_t tmp_cpumask;
 static DEFINE_MUTEX(rdtgroup_mutex);
+struct static_key __read_mostly rdt_enable_key = STATIC_KEY_INIT_FALSE;
 
 struct rdt_remote_data {
 	int msr;
 	u64 val;
 };
+
+void __intel_rdt_sched_in(void *dummy)
+{
+	struct intel_pqr_state *state = this_cpu_ptr(&pqr_state);
+
+	/*
+	 * Currently closid is always 0. When  user interface is added,
+	 * closid will come from user interface.
+	 */
+	if (state->closid == 0)
+		return;
+
+	wrmsr(MSR_IA32_PQR_ASSOC, state->rmid, 0);
+	state->closid = 0;
+}
 
 static inline void closid_get(u32 closid)
 {
