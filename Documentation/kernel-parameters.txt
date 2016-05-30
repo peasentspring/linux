@@ -3692,6 +3692,19 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			Memory area to be used by remote processor image,
 			managed by CMA.
 
+	resctrl=	[X86] Resource control
+			Format:
+			[disable_cat_l3][,simulate_cat_l3]
+
+			disable_cat_l3  - Disable CAT L3. By default, CAT L3
+					  is enabled.
+
+			simulate_cat_l3 - Simulate CAT L3 on a machine that
+					  doesn't have the feature. In the
+					  simulation, max closid is 16 and
+					  max cbm lenghth is 20, and host
+					  machine's cache hierarchy is used.
+
 	rw		[KNL] Mount root device read-write on boot
 
 	S		[KNL] Run init in single mode
