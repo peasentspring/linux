@@ -277,6 +277,172 @@ const struct raid6_calls raid6_avx512x4 = {
 	"avx512x4",
 	1                       /* Has cache hints */
 };
+
+/*
+ * Unrolled-by-8 AVX512 implementation
+ */
+
+static void raid6_avx5128_gen_syndrome(int disks, size_t bytes, void **ptrs)
+{
+	u8 **dptr = (u8 **)ptrs;
+	u8 *p, *q;
+	int d, z, z0;
+
+	z0 = disks - 3;         /* Highest data disk */
+	p = dptr[z0+1];         /* XOR parity */
+	q = dptr[z0+2];         /* RS syndrome */
+
+	kernel_fpu_begin();
+
+	asm volatile("vmovdqa64 %0,%%zmm0"
+		     : : "m" (raid6_avx512_constants.x1d[0]));
+	asm volatile("vpxorq %zmm1,%zmm1,%zmm1");       /* Zero temp */
+	asm volatile("vpxorq %zmm2,%zmm2,%zmm2");       /* P[0] */
+	asm volatile("vpxorq %zmm3,%zmm3,%zmm3");       /* P[1] */
+	asm volatile("vpxorq %zmm4,%zmm4,%zmm4");       /* Q[0] */
+	asm volatile("vpxorq %zmm6,%zmm6,%zmm6");       /* Q[1] */
+	asm volatile("vpxorq %zmm10,%zmm10,%zmm10");    /* P[2] */
+	asm volatile("vpxorq %zmm11,%zmm11,%zmm11");    /* P[3] */
+	asm volatile("vpxorq %zmm12,%zmm12,%zmm12");    /* Q[2] */
+	asm volatile("vpxorq %zmm14,%zmm14,%zmm14");    /* Q[3] */
+	asm volatile("vpxorq %zmm16,%zmm16,%zmm16");    /* P[4] */
+	asm volatile("vpxorq %zmm18,%zmm18,%zmm18");    /* P[5] */
+	asm volatile("vpxorq %zmm20,%zmm20,%zmm20");    /* Q[4] */
+	asm volatile("vpxorq %zmm22,%zmm22,%zmm22");    /* Q[5] */
+	asm volatile("vpxorq %zmm24,%zmm24,%zmm24");    /* P[6] */
+	asm volatile("vpxorq %zmm26,%zmm26,%zmm26");    /* P[7] */
+	asm volatile("vpxorq %zmm28,%zmm28,%zmm28");    /* Q[6] */
+	asm volatile("vpxorq %zmm30,%zmm30,%zmm30");    /* Q[7] */
+
+	for (d = 0; d < bytes; d += 512) {
+		for (z = z0; z >= 0; z--) {
+			asm volatile("prefetchnta %0" : : "m" (dptr[z][d]));
+			asm volatile("prefetchnta %0" : : "m" (dptr[z][d+64]));
+			asm volatile("prefetchnta %0" : : "m" (dptr[z][d+128]));
+			asm volatile("prefetchnta %0" : : "m" (dptr[z][d+192]));
+			asm volatile("prefetchnta %0" : : "m" (dptr[z][d+256]));
+			asm volatile("prefetchnta %0" : : "m" (dptr[z][d+320]));
+			asm volatile("prefetchnta %0" : : "m" (dptr[z][d+384]));
+			asm volatile("prefetchnta %0" : : "m" (dptr[z][d+448]));
+			asm volatile("vpcmpgtb %zmm4,%zmm1,%k1");
+			asm volatile("vpcmpgtb %zmm6,%zmm1,%k2");
+			asm volatile("vpcmpgtb %zmm12,%zmm1,%k3");
+			asm volatile("vpcmpgtb %zmm14,%zmm1,%k4");
+			asm volatile("vpmovm2b %k1,%zmm5");
+			asm volatile("vpmovm2b %k2,%zmm7");
+			asm volatile("vpmovm2b %k3,%zmm13");
+			asm volatile("vpmovm2b %k4,%zmm15");
+			asm volatile("vpcmpgtb %zmm20,%zmm1,%k5");
+			asm volatile("vpcmpgtb %zmm22,%zmm1,%k6");
+			asm volatile("vpcmpgtb %zmm28,%zmm1,%k7");
+			asm volatile("vpcmpgtb %zmm30,%zmm1,%k1");
+			asm volatile("vpmovm2b %k5,%zmm21");
+			asm volatile("vpmovm2b %k6,%zmm23");
+			asm volatile("vpmovm2b %k7,%zmm29");
+			asm volatile("vpmovm2b %k1,%zmm31");
+			asm volatile("vpaddb %zmm4,%zmm4,%zmm4");
+			asm volatile("vpaddb %zmm6,%zmm6,%zmm6");
+			asm volatile("vpaddb %zmm12,%zmm12,%zmm12");
+			asm volatile("vpaddb %zmm14,%zmm14,%zmm14");
+			asm volatile("vpaddb %zmm20,%zmm20,%zmm20");
+			asm volatile("vpaddb %zmm22,%zmm22,%zmm22");
+			asm volatile("vpaddb %zmm28,%zmm28,%zmm28");
+			asm volatile("vpaddb %zmm30,%zmm30,%zmm30");
+			asm volatile("vpandd %zmm0,%zmm5,%zmm5");
+			asm volatile("vpandd %zmm0,%zmm7,%zmm7");
+			asm volatile("vpandd %zmm0,%zmm13,%zmm13");
+			asm volatile("vpandd %zmm0,%zmm15,%zmm15");
+			asm volatile("vpandd %zmm0,%zmm21,%zmm21");
+			asm volatile("vpandd %zmm0,%zmm23,%zmm23");
+			asm volatile("vpandd %zmm0,%zmm29,%zmm29");
+			asm volatile("vpandd %zmm0,%zmm31,%zmm31");
+			asm volatile("vpxorq %zmm5,%zmm4,%zmm4");
+			asm volatile("vpxorq %zmm7,%zmm6,%zmm6");
+			asm volatile("vpxorq %zmm13,%zmm12,%zmm12");
+			asm volatile("vpxorq %zmm15,%zmm14,%zmm14");
+			asm volatile("vpxorq %zmm21,%zmm20,%zmm20");
+			asm volatile("vpxorq %zmm23,%zmm22,%zmm22");
+			asm volatile("vpxorq %zmm29,%zmm28,%zmm28");
+			asm volatile("vpxorq %zmm31,%zmm30,%zmm30");
+			asm volatile("vmovdqa64 %0,%%zmm5"
+				     : : "m" (dptr[z][d]));
+			asm volatile("vmovdqa64 %0,%%zmm7"
+				     : : "m" (dptr[z][d+64]));
+			asm volatile("vmovdqa64 %0,%%zmm13"
+				     : : "m" (dptr[z][d+128]));
+			asm volatile("vmovdqa64 %0,%%zmm15"
+				     : : "m" (dptr[z][d+192]));
+			asm volatile("vmovdqa64 %0,%%zmm21"
+				     : : "m" (dptr[z][d+256]));
+			asm volatile("vmovdqa64 %0,%%zmm23"
+				     : : "m" (dptr[z][d+320]));
+			asm volatile("vmovdqa64 %0,%%zmm29"
+				     : : "m" (dptr[z][d+384]));
+			asm volatile("vmovdqa64 %0,%%zmm31"
+				     : : "m" (dptr[z][d+448]));
+			asm volatile("vpxorq %zmm5,%zmm2,%zmm2");
+			asm volatile("vpxorq %zmm7,%zmm3,%zmm3");
+			asm volatile("vpxorq %zmm13,%zmm10,%zmm10");
+			asm volatile("vpxorq %zmm15,%zmm11,%zmm11");
+			asm volatile("vpxorq %zmm5,%zmm4,%zmm4");
+			asm volatile("vpxorq %zmm7,%zmm6,%zmm6");
+			asm volatile("vpxorq %zmm13,%zmm12,%zmm12");
+			asm volatile("vpxorq %zmm15,%zmm14,%zmm14");
+			asm volatile("vpxorq %zmm21,%zmm16,%zmm16");
+			asm volatile("vpxorq %zmm23,%zmm18,%zmm18");
+			asm volatile("vpxorq %zmm29,%zmm24,%zmm24");
+			asm volatile("vpxorq %zmm31,%zmm26,%zmm26");
+			asm volatile("vpxorq %zmm21,%zmm20,%zmm20");
+			asm volatile("vpxorq %zmm23,%zmm22,%zmm22");
+			asm volatile("vpxorq %zmm29,%zmm28,%zmm28");
+			asm volatile("vpxorq %zmm31,%zmm30,%zmm30");
+		}
+		asm volatile("vmovntdq %%zmm2,%0" : "=m" (p[d]));
+		asm volatile("vpxorq %zmm2,%zmm2,%zmm2");
+		asm volatile("vmovntdq %%zmm3,%0" : "=m" (p[d+64]));
+		asm volatile("vpxorq %zmm3,%zmm3,%zmm3");
+		asm volatile("vmovntdq %%zmm10,%0" : "=m" (p[d+128]));
+		asm volatile("vpxorq %zmm10,%zmm10,%zmm10");
+		asm volatile("vmovntdq %%zmm11,%0" : "=m" (p[d+192]));
+		asm volatile("vpxorq %zmm11,%zmm11,%zmm11");
+		asm volatile("vmovntdq %%zmm4,%0" : "=m" (q[d]));
+		asm volatile("vpxorq %zmm4,%zmm4,%zmm4");
+		asm volatile("vmovntdq %%zmm6,%0" : "=m" (q[d+64]));
+		asm volatile("vpxorq %zmm6,%zmm6,%zmm6");
+		asm volatile("vmovntdq %%zmm12,%0" : "=m" (q[d+128]));
+		asm volatile("vpxorq %zmm12,%zmm12,%zmm12");
+		asm volatile("vmovntdq %%zmm14,%0" : "=m" (q[d+192]));
+		asm volatile("vpxorq %zmm14,%zmm14,%zmm14");
+		asm volatile("vmovntdq %%zmm16,%0" : "=m" (p[d+256]));
+		asm volatile("vpxorq %zmm16,%zmm16,%zmm16");
+		asm volatile("vmovntdq %%zmm18,%0" : "=m" (p[d+320]));
+		asm volatile("vpxorq %zmm18,%zmm18,%zmm18");
+		asm volatile("vmovntdq %%zmm24,%0" : "=m" (p[d+384]));
+		asm volatile("vpxorq %zmm24,%zmm24,%zmm24");
+		asm volatile("vmovntdq %%zmm26,%0" : "=m" (p[d+448]));
+		asm volatile("vpxorq %zmm26,%zmm26,%zmm26");
+		asm volatile("vmovntdq %%zmm20,%0" : "=m" (q[d+256]));
+		asm volatile("vpxorq %zmm20,%zmm20,%zmm20");
+		asm volatile("vmovntdq %%zmm22,%0" : "=m" (q[d+320]));
+		asm volatile("vpxorq %zmm22,%zmm22,%zmm22");
+		asm volatile("vmovntdq %%zmm28,%0" : "=m" (q[d+384]));
+		asm volatile("vpxorq %zmm28,%zmm28,%zmm28");
+		asm volatile("vmovntdq %%zmm30,%0" : "=m" (q[d+448]));
+		asm volatile("vpxorq %zmm30,%zmm30,%zmm30");
+	}
+
+	asm volatile("sfence" : : : "memory");
+	kernel_fpu_end();
+}
+
+const struct raid6_calls raid6_avx512x8 = {
+	raid6_avx5128_gen_syndrome,
+	NULL,                   /* XOR not yet implemented */
+	raid6_have_avx512,
+	"avx512x8",
+	1                       /* Has cache hints */
+};
+
 #endif
 
 #endif /* CONFIG_AS_AVX512 */
