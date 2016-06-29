@@ -84,6 +84,8 @@
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
 
+#include <asm/intel_rdt.h>
+
 #include <trace/events/sched.h>
 
 #define CREATE_TRACE_POINTS
@@ -1426,6 +1428,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	p->io_context = NULL;
 	p->audit_context = NULL;
 	cgroup_fork(p);
+	rdtgroup_fork(p);
 #ifdef CONFIG_NUMA
 	p->mempolicy = mpol_dup(p->mempolicy);
 	if (IS_ERR(p->mempolicy)) {
