@@ -54,6 +54,7 @@
 #include <linux/writeback.h>
 #include <linux/shm.h>
 #include <linux/kcov.h>
+#include <linux/resctrl.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -837,6 +838,7 @@ void do_exit(long code)
 	perf_event_exit_task(tsk);
 
 	cgroup_exit(tsk);
+	rdtgroup_exit(tsk);
 
 	/*
 	 * FIXME: do that only when needed, using sched_exit tracepoint
