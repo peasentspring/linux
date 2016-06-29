@@ -953,3 +953,25 @@ int __init rdtgroup_init(void)
 
 	return 0;
 }
+
+void rdtgroup_fork(struct task_struct *child)
+{
+	struct rdtgroup *rdtgrp;
+
+	INIT_LIST_HEAD(&child->rg_list);
+	if (!rdtgroup_mounted)
+		return;
+
+	mutex_lock(&rdtgroup_mutex);
+
+	rdtgrp = current->rdtgroup;
+	if (!rdtgrp)
+		goto out;
+
+	list_add_tail(&child->rg_list, &rdtgrp->pset.tasks);
+	child->rdtgroup = rdtgrp;
+	atomic_inc(&rdtgrp->refcount);
+
+out:
+	mutex_unlock(&rdtgroup_mutex);
+}
