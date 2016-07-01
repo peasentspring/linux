@@ -67,6 +67,7 @@ const struct raid6_calls * const raid6_algos[] = {
 	&raid6_avx512x1,
 	&raid6_avx512x2,
 	&raid6_avx512x4,
+	&raid6_avx512x8,
 #endif
 #endif
 #ifdef CONFIG_ALTIVEC
