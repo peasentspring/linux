@@ -7,7 +7,14 @@
 #include <linux/kernfs.h>
 #include <asm/intel_rdt.h>
 
+/* Defined in intel_rdt_rdtgroup.c.*/
+extern int __init rdtgroup_init(void);
 extern void rdtgroup_exit(struct task_struct *tsk);
+
+/* Defined in intel_rdt.c. */
+extern struct list_head rdtgroup_lists;
+extern struct rdtgroup *rdtgroup_kn_lock_live(struct kernfs_node *kn);
+extern void rdtgroup_kn_unlock(struct kernfs_node *kn);
 
 /* cftype->flags */
 enum {
