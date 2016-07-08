@@ -794,6 +794,8 @@ static int __init intel_rdt_late_init(void)
 	if (ret < 0)
 		return ret;
 
+	rdtgroup_init();
+
 	pr_info("Intel cache allocation enabled\n");
 	if (cpu_has(c, X86_FEATURE_CDP_L3))
 		pr_info("Intel code data prioritization detected\n");
