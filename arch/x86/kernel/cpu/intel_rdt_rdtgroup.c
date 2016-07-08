@@ -59,6 +59,10 @@ static struct dentry *rdt_mount(struct file_system_type *fs_type,
 			 void *data);
 static void rdt_kill_sb(struct super_block *sb);
 
+static int rdtgroup_cpus_show(struct seq_file *s, void *v);
+static ssize_t rdtgroup_cpus_write(struct kernfs_open_file *of,
+			char *buf, size_t nbytes, loff_t off);
+
 /* rdtgroup core interface files */
 static struct rftype rdtgroup_root_base_files[] = {
 	{
@@ -1185,4 +1189,87 @@ static void rdt_kill_sb(struct super_block *sb)
 	rdtgroup_mounted = false;
 
 	mutex_unlock(&rdtgroup_mutex);
+}
+
+static int rdtgroup_cpus_show(struct seq_file *s, void *v)
+{
+	struct kernfs_open_file *of = s->private;
+	struct rdtgroup *rdtgrp;
+
+	rdtgrp = rdtgroup_kn_lock_live(of->kn);
+	seq_printf(s, "%*pb\n", cpumask_pr_args(&rdtgrp->cpu_mask));
+	rdtgroup_kn_unlock(of->kn);
+
+	return 0;
+}
+
+static int cpus_validate(struct cpumask *cpumask, struct rdtgroup *rdtgrp)
+{
+	int old_cpumask_bit, new_cpumask_bit;
+	int cpu;
+
+	for_each_online_cpu(cpu) {
+		old_cpumask_bit = cpumask_test_cpu(cpu, &rdtgrp->cpu_mask);
+		new_cpumask_bit = cpumask_test_cpu(cpu, cpumask);
+		/* Cannot clear a "cpus" bit in a rdtgroup. */
+		if (old_cpumask_bit == 1 && new_cpumask_bit == 0)
+			return -EINVAL;
+	}
+
+	/* If a cpu is not online, cannot set it. */
+	for_each_cpu(cpu, cpumask) {
+		if (!cpu_online(cpu))
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
+static ssize_t rdtgroup_cpus_write(struct kernfs_open_file *of,
+			char *buf, size_t nbytes, loff_t off)
+{
+	struct rdtgroup *rdtgrp;
+	unsigned long bitmap[BITS_TO_LONGS(NR_CPUS)];
+	struct cpumask *cpumask;
+	int cpu;
+	struct list_head *l;
+	struct rdtgroup *r;
+	int ret = 0;
+
+	if (!buf)
+		return -EINVAL;
+
+	rdtgrp = rdtgroup_kn_lock_live(of->kn);
+	if (!rdtgrp)
+		return -ENODEV;
+
+	if (list_empty(&rdtgroup_lists)) {
+		ret = -EINVAL;
+		goto end;
+	}
+
+	__bitmap_parse(buf, strlen(buf), 0, bitmap, nr_cpu_ids);
+
+	cpumask = to_cpumask(bitmap);
+	ret = cpus_validate(cpumask, rdtgrp);
+	if (ret)
+		goto end;
+
+	list_for_each(l, &rdtgroup_lists) {
+		r = list_entry(l, struct rdtgroup, rdtgroup_list);
+		if (r == rdtgrp)
+			continue;
+
+		for_each_cpu_and(cpu, &r->cpu_mask, cpumask)
+			cpumask_clear_cpu(cpu, &r->cpu_mask);
+	}
+
+	cpumask_copy(&rdtgrp->cpu_mask, cpumask);
+	for_each_cpu(cpu, cpumask)
+		per_cpu(cpu_rdtgroup, cpu) = rdtgrp;
+
+end:
+	rdtgroup_kn_unlock(of->kn);
+
+	return ret ?: nbytes;
 }
