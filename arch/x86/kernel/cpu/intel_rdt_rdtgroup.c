@@ -51,6 +51,13 @@ static int rdt_info_show(struct seq_file *seq, void *v);
 static int rdt_max_closid_show(struct seq_file *seq, void *v);
 static int rdt_max_cbm_len_show(struct seq_file *seq, void *v);
 static int domain_to_cache_id_show(struct seq_file *seq, void *v);
+static int rdtgroup_mkdir(struct kernfs_node *parent_kn, const char *name,
+			umode_t mode);
+static int rdtgroup_rmdir(struct kernfs_node *kn);
+static struct dentry *rdt_mount(struct file_system_type *fs_type,
+			 int flags, const char *unused_dev_name,
+			 void *data);
+static void rdt_kill_sb(struct super_block *sb);
 
 /* rdtgroup core interface files */
 static struct rftype rdtgroup_root_base_files[] = {
@@ -112,12 +119,24 @@ static struct rftype rdtgroup_partition_base_files[] = {
 	},
 };
 
+static struct kernfs_syscall_ops rdtgroup_kf_syscall_ops = {
+	.mkdir          = rdtgroup_mkdir,
+	.rmdir          = rdtgroup_rmdir,
+};
+
+static struct file_system_type rdt_fs_type = {
+	.name = "resctrl",
+	.mount = rdt_mount,
+	.kill_sb = rdt_kill_sb,
+};
+
 struct rdtgroup *root_rdtgrp;
 static struct rftype rdtgroup_partition_base_files[];
 struct cache_domain cache_domains[MAX_CACHE_LEAVES];
 /* The default hierarchy. */
 struct rdtgroup_root rdtgrp_dfl_root;
 static struct list_head rdtgroups;
+bool rdtgroup_mounted;
 
 /*
  * kernfs_root - find out the kernfs_root a kernfs_node belongs to
@@ -730,6 +749,110 @@ static void rdtgroup_destroy_locked(struct rdtgroup *rdtgrp)
 	kernfs_remove(rdtgrp->kn);
 }
 
+static int rdtgroup_mkdir(struct kernfs_node *parent_kn, const char *name,
+			umode_t mode)
+{
+	struct rdtgroup *parent, *rdtgrp;
+	struct rdtgroup_root *root;
+	struct kernfs_node *kn;
+	int ret;
+
+	if (parent_kn != root_rdtgrp->kn)
+		return -EPERM;
+
+	/* Do not accept '\n' to avoid unparsable situation.
+	 */
+	if (strchr(name, '\n'))
+		return -EINVAL;
+
+	parent = rdtgroup_kn_lock_live(parent_kn);
+	if (!parent)
+		return -ENODEV;
+	root = parent->root;
+
+	/* allocate the rdtgroup. */
+	rdtgrp = kzalloc(sizeof(*rdtgrp), GFP_KERNEL);
+	if (!rdtgrp) {
+		ret = -ENOMEM;
+		goto out_unlock;
+	}
+
+	INIT_LIST_HEAD(&rdtgrp->pset.tasks);
+
+	cpumask_clear(&rdtgrp->cpu_mask);
+
+	rdtgrp->root = root;
+
+	/* create the directory */
+	kn = kernfs_create_dir(parent->kn, name, mode, rdtgrp);
+	if (IS_ERR(kn)) {
+		ret = PTR_ERR(kn);
+		goto out_cancel_ref;
+	}
+	rdtgrp->kn = kn;
+
+	/*
+	 * This extra ref will be put in kernfs_remove() and guarantees
+	 * that @rdtgrp->kn is always accessible.
+	 */
+	kernfs_get(kn);
+
+	atomic_inc(&root->nr_rdtgrps);
+
+	ret = rdtgroup_kn_set_ugid(kn);
+	if (ret)
+		goto out_destroy;
+
+	ret = rdtgroup_partition_populate_dir(kn);
+	if (ret)
+		goto out_destroy;
+
+	kernfs_activate(kn);
+
+	list_add_tail(&rdtgrp->rdtgroup_list, &rdtgroup_lists);
+	/* Generate default schema for rdtgrp. */
+	ret = get_default_resources(rdtgrp);
+	if (ret)
+		goto out_destroy;
+
+	ret = 0;
+	goto out_unlock;
+
+out_cancel_ref:
+	kfree(rdtgrp);
+out_unlock:
+	rdtgroup_kn_unlock(parent_kn);
+	return ret;
+
+out_destroy:
+	rdtgroup_destroy_locked(rdtgrp);
+	goto out_unlock;
+}
+
+static int rdtgroup_rmdir(struct kernfs_node *kn)
+{
+	struct rdtgroup *rdtgrp;
+	int cpu;
+	int ret = 0;
+
+	rdtgrp = rdtgroup_kn_lock_live(kn);
+	if (!rdtgrp)
+		return -ENODEV;
+
+	if (!list_empty(&rdtgrp->pset.tasks)) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	for_each_cpu(cpu, &rdtgrp->cpu_mask)
+		per_cpu(cpu_rdtgroup, cpu) = root_rdtgrp;
+
+	rdtgroup_destroy_locked(rdtgrp);
+
+out:
+	rdtgroup_kn_unlock(kn);
+	return ret;
+}
 static int
 rdtgroup_move_task_all(struct rdtgroup *src_rdtgrp, struct rdtgroup *dst_rdtgrp)
 {
@@ -976,5 +1099,93 @@ void rdtgroup_fork(struct task_struct *child)
 	atomic_inc(&rdtgrp->refcount);
 
 out:
+	mutex_unlock(&rdtgroup_mutex);
+}
+
+static struct dentry *rdt_mount(struct file_system_type *fs_type,
+			 int flags, const char *unused_dev_name,
+			 void *data)
+{
+	struct super_block *pinned_sb = NULL;
+	struct rdtgroup_root *root;
+	struct dentry *dentry;
+	int ret;
+	bool new_sb;
+
+	/*
+	 * The first time anyone tries to mount a rdtgroup, enable the list
+	 * linking tasks and fix up all existing tasks.
+	 */
+	if (rdtgroup_mounted)
+		return ERR_PTR(-EBUSY);
+
+	rdt_opts.cdp_enabled = false;
+	rdt_opts.verbose = false;
+	cdp_enabled = false;
+
+	ret = parse_rdtgroupfs_options(data);
+	if (ret)
+		goto out_mount;
+
+	if (rdt_opts.cdp_enabled) {
+		cdp_enabled = true;
+		cconfig.max_closid >>= cdp_enabled;
+		pr_info("CDP is enabled\n");
+	}
+
+	init_msrs(cdp_enabled);
+
+	root = &rdtgrp_dfl_root;
+
+	ret = get_default_resources(&root->rdtgrp);
+	if (ret)
+		return ERR_PTR(-ENOSPC);
+
+out_mount:
+	dentry = kernfs_mount(fs_type, flags, root->kf_root,
+			      RDTGROUP_SUPER_MAGIC,
+			      &new_sb);
+	if (IS_ERR(dentry) || !new_sb)
+		goto out_unlock;
+
+	/*
+	 * If @pinned_sb, we're reusing an existing root and holding an
+	 * extra ref on its sb.  Mount is complete.  Put the extra ref.
+	 */
+	if (pinned_sb) {
+		WARN_ON(new_sb);
+		deactivate_super(pinned_sb);
+	}
+
+	INIT_LIST_HEAD(&root->rdtgrp.pset.tasks);
+
+	cpumask_copy(&root->rdtgrp.cpu_mask, cpu_online_mask);
+	static_key_slow_inc(&rdt_enable_key);
+	rdtgroup_mounted = true;
+
+	return dentry;
+
+out_unlock:
+	return ERR_PTR(ret);
+}
+
+static void rdt_kill_sb(struct super_block *sb)
+{
+	mutex_lock(&rdtgroup_mutex);
+
+	rmdir_all_sub();
+
+	static_key_slow_dec(&rdt_enable_key);
+
+	release_root_closid();
+	root_rdtgrp->resource.valid = false;
+
+	/* Restore max_closid to original value. */
+	cconfig.max_closid <<= cdp_enabled;
+
+	kernfs_kill_sb(sb);
+	INIT_LIST_HEAD(&root_rdtgrp->pset.tasks);
+	rdtgroup_mounted = false;
+
 	mutex_unlock(&rdtgroup_mutex);
 }

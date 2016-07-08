@@ -10,6 +10,7 @@
 /* Defined in intel_rdt_rdtgroup.c.*/
 extern int __init rdtgroup_init(void);
 extern void rdtgroup_exit(struct task_struct *tsk);
+extern bool rdtgroup_mounted;
 
 /* Defined in intel_rdt.c. */
 extern struct list_head rdtgroup_lists;
