@@ -17,6 +17,12 @@ extern struct list_head rdtgroup_lists;
 extern struct rdtgroup *rdtgroup_kn_lock_live(struct kernfs_node *kn);
 extern void rdtgroup_kn_unlock(struct kernfs_node *kn);
 
+/* Defiend in intel_rdt_schemata.c. */
+extern int get_default_resources(struct rdtgroup *rdtgrp);
+extern ssize_t rdtgroup_schemata_write(struct kernfs_open_file *of,
+				char *buf, size_t nbytes, loff_t off);
+extern int rdtgroup_schemata_show(struct seq_file *s, void *v);
+
 /* cftype->flags */
 enum {
 	RFTYPE_WORLD_WRITABLE = (1 << 4),/* (DON'T USE FOR NEW FILES) S_IWUGO */
