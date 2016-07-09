@@ -34,10 +34,6 @@
  */
 static struct clos_cbm_table *cctable;
 /*
- * closid availability bit map.
- */
-unsigned long *closmap;
-/*
  * Minimum bits required in Cache bitmask.
  */
 unsigned int min_bitmask_len = 1;
@@ -52,6 +48,11 @@ static cpumask_t rdt_cpumask;
 static cpumask_t tmp_cpumask;
 static DEFINE_MUTEX(rdtgroup_mutex);
 struct static_key __read_mostly rdt_enable_key = STATIC_KEY_INIT_FALSE;
+struct clos_config cconfig;
+bool cdp_enabled;
+
+#define __DCBM_TABLE_INDEX(x)	(x << 1)
+#define __ICBM_TABLE_INDEX(x)	((x << 1) + 1)
 
 struct rdt_remote_data {
 	int msr;
@@ -125,22 +126,28 @@ static int closid_alloc(u32 *closid)
 
 	lockdep_assert_held(&rdtgroup_mutex);
 
-	maxid = boot_cpu_data.x86_cache_max_closid;
-	id = find_first_zero_bit(closmap, maxid);
+	maxid = cconfig.max_closid;
+	id = find_first_zero_bit(cconfig.closmap, maxid);
 	if (id == maxid)
 		return -ENOSPC;
 
-	set_bit(id, closmap);
+	set_bit(id, cconfig.closmap);
 	closid_get(id);
 	*closid = id;
+	cconfig.closids_used++;
 
 	return 0;
 }
 
 static inline void closid_free(u32 closid)
 {
-	clear_bit(closid, closmap);
+	clear_bit(closid, cconfig.closmap);
 	cctable[closid].cbm = 0;
+
+	if (WARN_ON(!cconfig.closids_used))
+		return;
+
+	cconfig.closids_used--;
 }
 
 static void closid_put(u32 closid)
@@ -174,6 +181,21 @@ static inline void msr_update_all(int msr, u64 val)
 	on_each_cpu_mask(&rdt_cpumask, msr_cpu_update, &info, 1);
 }
 
+static bool code_data_mask_equal(void)
+{
+	int i, dindex, iindex;
+
+	for (i = 0; i < cconfig.max_closid; i++) {
+		dindex = __DCBM_TABLE_INDEX(i);
+		iindex = __ICBM_TABLE_INDEX(i);
+		if (cctable[dindex].clos_refcnt &&
+		     (cctable[dindex].cbm != cctable[iindex].cbm))
+			return false;
+	}
+
+	return true;
+}
+
 /*
  * Set only one cpu in cpumask in all cpus that share the same cache.
  */
@@ -194,7 +216,7 @@ static inline bool rdt_cpumask_update(int cpu)
  */
 static void cbm_update_msrs(void *dummy)
 {
-	int maxid = boot_cpu_data.x86_cache_max_closid;
+	int maxid = cconfig.max_closid;
 	struct rdt_remote_data info;
 	unsigned int i;
 
@@ -202,7 +224,7 @@ static void cbm_update_msrs(void *dummy)
 		if (cctable[i].clos_refcnt) {
 			info.msr = CBM_FROM_INDEX(i);
 			info.val = cctable[i].cbm;
-			msr_cpu_update(&info);
+			msr_cpu_update((void *) &info);
 		}
 	}
 }
@@ -278,8 +300,8 @@ static int __init intel_rdt_late_init(void)
 	}
 
 	size = BITS_TO_LONGS(maxid) * sizeof(long);
-	closmap = kzalloc(size, GFP_KERNEL);
-	if (!closmap) {
+	cconfig.closmap = kzalloc(size, GFP_KERNEL);
+	if (!cconfig.closmap) {
 		kfree(cctable);
 		err = -ENOMEM;
 		goto out_err;
