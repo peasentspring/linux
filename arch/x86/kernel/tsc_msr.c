@@ -70,7 +70,7 @@ static int match_cpu(u8 family, u8 model)
  */
 unsigned long cpu_khz_from_msr(void)
 {
-	u32 lo, hi, ratio, freq_id, freq;
+	u32 lo, hi, freq_id, freq, ratio = 0;
 	unsigned long res;
 	int cpu_index;
 
@@ -123,8 +123,8 @@ unsigned long cpu_khz_from_msr(void)
 	}
 
 get_ratio:
-	rdmsr(MSR_PLATFORM_INFO, lo, hi);
-	ratio = (lo >> 8) & 0xff;
+	if (!rdmsr_safe(MSR_PLATFORM_INFO, &lo, &hi))
+		ratio = (lo >> 8) & 0xff;
 
 done:
 	/* TSC frequency = maximum resolved freq * maximum resolved bus ratio */
