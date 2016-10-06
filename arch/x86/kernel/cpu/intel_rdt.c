@@ -29,7 +29,6 @@
 #include <linux/err.h>
 #include <linux/cpuhotplug.h>
 
-#include <asm/intel_rdt_common.h>
 #include <asm/intel-family.h>
 #include <asm/intel_rdt.h>
 
