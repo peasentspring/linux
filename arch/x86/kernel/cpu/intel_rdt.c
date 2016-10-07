@@ -26,10 +26,15 @@
 
 #include <linux/slab.h>
 #include <linux/err.h>
+#include <linux/cacheinfo.h>
+#include <linux/cpuhotplug.h>
 
 #include <asm/intel_rdt_common.h>
 #include <asm/intel-family.h>
 #include <asm/intel_rdt.h>
+
+/* Mutex to protect rdtgroup access. */
+DEFINE_MUTEX(rdtgroup_mutex);
 
 #define domain_init(id) LIST_HEAD_INIT(rdt_resources_all[id].domains)
 
@@ -71,6 +76,11 @@ struct rdt_resource rdt_resources_all[] = {
 		.cbm_idx_offset	= 0
 	},
 };
+
+static int cbm_idx(struct rdt_resource *r, int closid)
+{
+	return closid * r->cbm_idx_multi + r->cbm_idx_offset;
+}
 
 /*
  * cache_alloc_hsw_probe() - Have to probe for Intel haswell server CPUs
@@ -176,12 +186,177 @@ static inline bool get_rdt_resources(void)
 	return ret;
 }
 
-static int __init intel_rdt_late_init(void)
+static int get_cache_id(int cpu, int level)
+{
+	struct cpu_cacheinfo *ci = get_cpu_cacheinfo(cpu);
+	int i;
+
+	for (i = 0; i < ci->num_leaves; i++) {
+		if (ci->info_list[i].level == level)
+			return ci->info_list[i].id;
+	}
+
+	return -1;
+}
+
+void rdt_cbm_update(void *arg)
+{
+	struct msr_param *m = (struct msr_param *)arg;
+	struct rdt_resource *r = m->res;
+	int i, cpu = smp_processor_id();
+	struct rdt_domain *d;
+
+	list_for_each_entry(d, &r->domains, list) {
+		/* Find the domain that contains this CPU */
+		if (cpumask_test_cpu(cpu, &d->cpu_mask))
+			goto found;
+	}
+	pr_info_once("cpu %d not found in any domain for resource %s\n",
+		     cpu, r->name);
+
+	return;
+
+found:
+	for (i = m->low; i < m->high; i++) {
+		int idx = cbm_idx(r, i);
+
+		wrmsrl(r->msr_base + idx, d->cbm[i]);
+	}
+}
+
+static struct rdt_domain *rdt_find_domain(struct rdt_resource *r, int id,
+					  struct list_head **pos)
+{
+	struct rdt_domain *d;
+	struct list_head *l;
+
+	if (id < 0)
+		return ERR_PTR(id);
+
+	list_for_each(l, &r->domains) {
+		d = list_entry(l, struct rdt_domain, list);
+		/* When id is found, return its domain. */
+		if (id == d->id)
+			return d;
+		/* Stop searching when finding id's position in sorted list. */
+		if (id < d->id)
+			break;
+	}
+	/*
+	 * No id is found in resource domains. Record the position
+	 * that the new domain will be added. The posistion is not used
+	 * when removing a domain.
+	 */
+	*pos = l;
+
+	return NULL;
+}
+
+static void domain_add_cpu(int cpu, struct rdt_resource *r)
+{
+	int i, id = get_cache_id(cpu, r->cache_level);
+	struct list_head *add_pos = NULL;
+	struct rdt_domain *d;
+
+	d = rdt_find_domain(r, id, &add_pos);
+	if (IS_ERR(d)) {
+		pr_warn("Could't find cache id for cpu %d\n", cpu);
+		return;
+	}
+
+	if (d) {
+		cpumask_set_cpu(cpu, &d->cpu_mask);
+		return;
+	}
+
+	if (!add_pos) {
+		pr_warn("Couldn't add cpu %d in %s domain\n", cpu, r->name);
+		return;
+	}
+
+	d = kzalloc_node(sizeof(*d), GFP_KERNEL, cpu_to_node(cpu));
+	if (!d)
+		return;
+
+	d->id = id;
+	d->cbm = kmalloc_array(r->num_closid, sizeof(*d->cbm), GFP_KERNEL);
+	if (!d->cbm) {
+		pr_warn("Failed to alloc CBM array for cpu %d\n", cpu);
+		kfree(d);
+		return;
+	}
+	for (i = 0; i < r->num_closid; i++) {
+		int idx = cbm_idx(r, i);
+
+		d->cbm[i] = r->max_cbm;
+		wrmsrl(r->msr_base + idx, d->cbm[i]);
+	}
+	cpumask_set_cpu(cpu, &d->cpu_mask);
+	list_add_tail(&d->list, add_pos);
+	r->num_domains++;
+}
+
+static void domain_remove_cpu(int cpu, struct rdt_resource *r)
+{
+	int id = get_cache_id(cpu, r->cache_level);
+	struct list_head *pos;
+	struct rdt_domain *d;
+
+	d = rdt_find_domain(r, id, &pos);
+	if (IS_ERR_OR_NULL(d)) {
+		pr_warn("Could't find cache id for cpu %d\n", cpu);
+		return;
+	}
+
+	cpumask_clear_cpu(cpu, &d->cpu_mask);
+	if (cpumask_empty(&d->cpu_mask)) {
+		r->num_domains--;
+		kfree(d->cbm);
+		list_del(&d->list);
+		kfree(d);
+	}
+}
+
+static int intel_rdt_online_cpu(unsigned int cpu)
+{
+	struct intel_pqr_state *state = this_cpu_ptr(&pqr_state);
+	struct rdt_resource *r;
+
+	mutex_lock(&rdtgroup_mutex);
+	for_each_capable_rdt_resource(r)
+		domain_add_cpu(cpu, r);
+	state->closid = 0;
+	wrmsr(MSR_IA32_PQR_ASSOC, state->rmid, 0);
+	mutex_unlock(&rdtgroup_mutex);
+
+	return 0;
+}
+
+static int intel_rdt_offline_cpu(unsigned int cpu)
 {
 	struct rdt_resource *r;
 
+	mutex_lock(&rdtgroup_mutex);
+	for_each_capable_rdt_resource(r)
+		domain_remove_cpu(cpu, r);
+	mutex_unlock(&rdtgroup_mutex);
+
+	return 0;
+}
+
+static int __init intel_rdt_late_init(void)
+{
+	struct rdt_resource *r;
+	int state;
+
 	if (!get_rdt_resources())
 		return -ENODEV;
+
+	state = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN,
+				  "x86/rdt/cat:online:",
+				  intel_rdt_online_cpu, intel_rdt_offline_cpu);
+	if (state < 0)
+		return state;
 
 	for_each_capable_rdt_resource(r)
 		pr_info("Intel RDT %s allocation detected\n", r->name);
