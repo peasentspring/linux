@@ -36,6 +36,8 @@
 /* Mutex to protect rdtgroup access. */
 DEFINE_MUTEX(rdtgroup_mutex);
 
+DEFINE_PER_CPU_READ_MOSTLY(int, cpu_closid);
+
 #define domain_init(id) LIST_HEAD_INIT(rdt_resources_all[id].domains)
 
 struct rdt_resource rdt_resources_all[] = {
@@ -323,8 +325,11 @@ static int intel_rdt_online_cpu(unsigned int cpu)
 	struct rdt_resource *r;
 
 	mutex_lock(&rdtgroup_mutex);
+	per_cpu(cpu_closid, cpu) = 0;
 	for_each_capable_rdt_resource(r)
 		domain_add_cpu(cpu, r);
+	/* The cpu is set in default rdtgroup after online. */
+	cpumask_set_cpu(cpu, &rdtgroup_default.cpu_mask);
 	state->closid = 0;
 	wrmsr(MSR_IA32_PQR_ASSOC, state->rmid, 0);
 	mutex_unlock(&rdtgroup_mutex);
@@ -334,11 +339,16 @@ static int intel_rdt_online_cpu(unsigned int cpu)
 
 static int intel_rdt_offline_cpu(unsigned int cpu)
 {
+	struct rdtgroup *rdtgrp;
 	struct rdt_resource *r;
 
 	mutex_lock(&rdtgroup_mutex);
 	for_each_capable_rdt_resource(r)
 		domain_remove_cpu(cpu, r);
+	list_for_each_entry(rdtgrp, &rdt_all_groups, rdtgroup_list) {
+		if (cpumask_test_and_clear_cpu(cpu, &rdtgrp->cpu_mask))
+			break;
+	}
 	mutex_unlock(&rdtgroup_mutex);
 
 	return 0;
