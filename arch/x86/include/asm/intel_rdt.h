@@ -67,6 +67,7 @@ struct rftype {
  * @cdp_capable:		Code/Data Prioritization available
  * @cdp_enabled:		Code/Data Prioritization enabled
  * @tmp_cbms:			Scratch space when updating schemata
+ * @num_cbms:			Number of CBMs in tmp_cbms
  * @cache_level:		Which cache level defines scope of this domain
  */
 struct rdt_resource {
@@ -83,6 +84,7 @@ struct rdt_resource {
 	bool			cdp_capable;
 	bool			cdp_enabled;
 	u32			*tmp_cbms;
+	int			num_cbms;
 	int			cache_level;
 };
 
@@ -155,4 +157,8 @@ DECLARE_PER_CPU_READ_MOSTLY(int, cpu_closid);
 void rdt_cbm_update(void *arg);
 struct rdtgroup *rdtgroup_kn_lock_live(struct kernfs_node *kn);
 void rdtgroup_kn_unlock(struct kernfs_node *kn);
+ssize_t rdtgroup_schemata_write(struct kernfs_open_file *of,
+				char *buf, size_t nbytes, loff_t off);
+int rdtgroup_schemata_show(struct kernfs_open_file *of,
+			   struct seq_file *s, void *v);
 #endif /* _ASM_X86_INTEL_RDT_H */
