@@ -23,6 +23,8 @@
 #include <linux/fs.h>
 #include <linux/sysfs.h>
 #include <linux/kernfs.h>
+#include <linux/seq_file.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 
 #include <uapi/linux/magic.h>
@@ -33,6 +35,173 @@ DEFINE_STATIC_KEY_FALSE(rdt_enable_key);
 struct kernfs_root *rdt_root;
 struct rdtgroup rdtgroup_default;
 LIST_HEAD(rdt_all_groups);
+
+/* set uid and gid of rdtgroup dirs and files to that of the creator */
+static int rdtgroup_kn_set_ugid(struct kernfs_node *kn)
+{
+	struct iattr iattr = { .ia_valid = ATTR_UID | ATTR_GID,
+				.ia_uid = current_fsuid(),
+				.ia_gid = current_fsgid(), };
+
+	if (uid_eq(iattr.ia_uid, GLOBAL_ROOT_UID) &&
+	    gid_eq(iattr.ia_gid, GLOBAL_ROOT_GID))
+		return 0;
+
+	return kernfs_setattr(kn, &iattr);
+}
+
+static int rdtgroup_add_file(struct kernfs_node *parent_kn, struct rftype *rft)
+{
+	struct kernfs_node *kn;
+	int ret;
+
+	kn = __kernfs_create_file(parent_kn, rft->name, rft->mode,
+				  0, rft->kf_ops, rft, NULL, NULL);
+	if (IS_ERR(kn))
+		return PTR_ERR(kn);
+
+	ret = rdtgroup_kn_set_ugid(kn);
+	if (ret) {
+		kernfs_remove(kn);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int rdtgroup_add_files(struct kernfs_node *kn, struct rftype *rfts)
+{
+	struct rftype *rft;
+	int ret;
+
+	lockdep_assert_held(&rdtgroup_mutex);
+
+	for (rft = rfts; rft->name; rft++) {
+		ret = rdtgroup_add_file(kn, rft);
+		if (ret)
+			goto error;
+	}
+
+	return 0;
+error:
+	pr_warn("%s: failed to add %s, err=%d\n", __func__, rft->name, ret);
+	while (--rft >= rfts)
+		kernfs_remove_by_name(kn, rft->name);
+	return ret;
+}
+
+static int rdtgroup_seqfile_show(struct seq_file *m, void *arg)
+{
+	struct kernfs_open_file *of = m->private;
+	struct rftype *rft = of->kn->priv;
+
+	if (rft->seq_show)
+		return rft->seq_show(of, m, arg);
+	return 0;
+}
+
+static ssize_t rdtgroup_file_write(struct kernfs_open_file *of, char *buf,
+				   size_t nbytes, loff_t off)
+{
+	struct rftype *rft = of->kn->priv;
+
+	if (rft->write)
+		return rft->write(of, buf, nbytes, off);
+
+	return -EINVAL;
+}
+
+static struct kernfs_ops rdtgroup_kf_single_ops = {
+	.atomic_write_len	= PAGE_SIZE,
+	.write			= rdtgroup_file_write,
+	.seq_show		= rdtgroup_seqfile_show,
+};
+
+static int rdt_num_closid_show(struct kernfs_open_file *of,
+			       struct seq_file *seq, void *v)
+{
+	struct rdt_resource *r = of->kn->parent->priv;
+
+	seq_printf(seq, "%d\n", r->num_closid);
+
+	return 0;
+}
+
+static int rdt_cbm_val_show(struct kernfs_open_file *of,
+			    struct seq_file *seq, void *v)
+{
+	struct rdt_resource *r = of->kn->parent->priv;
+
+	seq_printf(seq, "%x\n", r->max_cbm);
+
+	return 0;
+}
+
+/* rdtgroup information files for one cache resource. */
+static struct rftype res_info_files[] = {
+	{
+		.name		= "num_closid",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= rdt_num_closid_show,
+	},
+	{
+		.name		= "cbm_val",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= rdt_cbm_val_show,
+	},
+	{
+		/* NULL terminated */
+	}
+};
+
+static int rdtgroup_create_info_dir(struct kernfs_node *parent_kn)
+{
+	struct kernfs_node *kn, *kn_subdir;
+	struct rdt_resource *r;
+	int ret;
+
+	/* create the directory */
+	kn = kernfs_create_dir(parent_kn, "info", parent_kn->mode, NULL);
+	if (IS_ERR(kn))
+		return PTR_ERR(kn);
+	kernfs_get(kn);
+
+	for_each_rdt_resource(r) {
+		kn_subdir = kernfs_create_dir(kn, r->name, kn->mode, r);
+		if (IS_ERR(kn_subdir)) {
+			ret = PTR_ERR(kn_subdir);
+			goto out_destroy;
+		}
+		kernfs_get(kn_subdir);
+		ret = rdtgroup_kn_set_ugid(kn_subdir);
+		if (ret)
+			goto out_destroy;
+		ret = rdtgroup_add_files(kn_subdir, res_info_files);
+		if (ret)
+			goto out_destroy;
+		kernfs_activate(kn_subdir);
+	}
+
+	/*
+	 * This extra ref will be put in kernfs_remove() and guarantees
+	 * that @rdtgrp->kn is always accessible.
+	 */
+	kernfs_get(kn);
+
+	ret = rdtgroup_kn_set_ugid(kn);
+	if (ret)
+		goto out_destroy;
+
+	kernfs_activate(kn);
+
+	return 0;
+
+out_destroy:
+	kernfs_remove(kn);
+	return ret;
+}
 
 static void l3_qos_cfg_update(void *arg)
 {
@@ -194,7 +363,9 @@ static int __init rdtgroup_setup_root(void)
 	list_add(&rdtgroup_default.rdtgroup_list, &rdt_all_groups);
 
 	rdtgroup_default.kn = rdt_root->kn;
-	kernfs_activate(rdtgroup_default.kn);
+	ret = rdtgroup_create_info_dir(rdtgroup_default.kn);
+	if (!ret)
+		kernfs_activate(rdtgroup_default.kn);
 
 	mutex_unlock(&rdtgroup_mutex);
 
