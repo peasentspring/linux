@@ -26,10 +26,48 @@
 
 #include <linux/slab.h>
 #include <linux/err.h>
+#include <asm/intel_rdt_common.h>
+#include <asm/intel-family.h>
+
+/*
+ * cache_alloc_hsw_probe() - Have to probe for Intel haswell server CPUs
+ * as it does not have CPUID enumeration support for Cache allocation.
+ *
+ * Probes by writing to the high 32 bits(CLOSid) of the IA32_PQR_MSR and
+ * testing if the bits stick. Max CLOSids is always 4 and max cbm length
+ * is always 20 on hsw server parts. The minimum cache bitmask length
+ * allowed for HSW server is always 2 bits. Hardcode all of them.
+ */
+static inline bool cache_alloc_hsw_probe(void)
+{
+	u32 l, h_old, h_new, h_tmp;
+
+	if (rdmsr_safe(MSR_IA32_PQR_ASSOC, &l, &h_old))
+		return false;
+
+	/*
+	 * Default value is always 0 if feature is present.
+	 */
+	h_tmp = h_old ^ 0x1U;
+	if (wrmsr_safe(MSR_IA32_PQR_ASSOC, l, h_tmp))
+		return false;
+	rdmsr(MSR_IA32_PQR_ASSOC, l, h_new);
+
+	if (h_tmp != h_new)
+		return false;
+
+	wrmsr(MSR_IA32_PQR_ASSOC, l, h_old);
+
+	return true;
+}
 
 static inline bool get_rdt_resources(struct cpuinfo_x86 *c)
 {
 	bool ret = false;
+
+	if (c->x86_vendor == X86_VENDOR_INTEL && c->x86 == 6 &&
+	    c->x86_model == INTEL_FAM6_HASWELL_X)
+		return cache_alloc_hsw_probe();
 
 	if (!cpu_has(c, X86_FEATURE_RDT_A))
 		return false;
