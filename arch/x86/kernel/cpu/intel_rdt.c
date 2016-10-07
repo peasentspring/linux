@@ -38,6 +38,8 @@ DEFINE_MUTEX(rdtgroup_mutex);
 
 int rdt_max_closid;
 
+DEFINE_PER_CPU_READ_MOSTLY(int, cpu_closid);
+
 #define domain_init(name) LIST_HEAD_INIT(rdt_resources_all[name].domains)
 
 struct rdt_resource rdt_resources_all[] = {
@@ -227,8 +229,11 @@ static int intel_rdt_online_cpu(unsigned int cpu)
 	struct rdt_resource *r;
 
 	mutex_lock(&rdtgroup_mutex);
+	per_cpu(cpu_closid, cpu) = 0;
 	for_each_rdt_resource(r)
 		update_domain(cpu, r, 1);
+	/* The cpu is set in default rdtgroup after online. */
+	cpumask_set_cpu(cpu, &rdtgroup_default.cpu_mask);
 	smp_call_function_single(cpu, rdt_reset_pqr_assoc_closid, NULL, 1);
 	mutex_unlock(&rdtgroup_mutex);
 
@@ -238,10 +243,17 @@ static int intel_rdt_online_cpu(unsigned int cpu)
 static int intel_rdt_offline_cpu(unsigned int cpu)
 {
 	struct rdt_resource *r;
+	struct rdtgroup *rdtgrp;
+	struct list_head *l;
 
 	mutex_lock(&rdtgroup_mutex);
 	for_each_rdt_resource(r)
 		update_domain(cpu, r, 0);
+	list_for_each(l, &rdt_all_groups) {
+		rdtgrp = list_entry(l, struct rdtgroup, rdtgroup_list);
+		if (cpumask_test_and_clear_cpu(cpu, &rdtgrp->cpu_mask))
+			break;
+	}
 	mutex_unlock(&rdtgroup_mutex);
 
 	return 0;
