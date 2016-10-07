@@ -265,6 +265,14 @@ static int __init intel_rdt_late_init(void)
 	for_each_rdt_resource(r)
 		rdt_max_closid = max(rdt_max_closid, r->max_closid);
 
+	/* limitation of our allocator, but h/w is more limited */
+	if (rdt_max_closid > 32) {
+		pr_warn("Only using 32/%d CLOSIDs\n", rdt_max_closid);
+		rdt_max_closid = 32;
+	}
+
+	rdtgroup_init();
+
 	for_each_rdt_resource(r)
 		pr_info("Intel %s allocation %s detected\n", r->name,
 			r->cdp_capable ? " (with CDP)" : "");

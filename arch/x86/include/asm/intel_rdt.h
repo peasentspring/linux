@@ -2,6 +2,23 @@
 #define _ASM_X86_INTEL_RDT_H
 
 /**
+ * struct rdtgroup - store rdtgroup's data in resctrl file system.
+ * @kn:				kernfs node
+ * @rdtgroup_list:		linked list for all rdtgroups
+ * @closid:			closid for this rdtgroup
+ */
+struct rdtgroup {
+	struct kernfs_node	*kn;
+	struct list_head	rdtgroup_list;
+	int			closid;
+};
+
+/* List of all resource groups */
+extern struct list_head rdt_all_groups;
+
+int __init rdtgroup_init(void);
+
+/**
  * struct rdt_resource - attributes of an RDT resource
  * @enabled:			Is this feature enabled on this machine
  * @name:			Name to use in "schemata" file
@@ -39,6 +56,7 @@ struct rdt_resource {
 	for (r = rdt_resources_all; r->name; r++) \
 		if (r->enabled)
 
+#define IA32_L3_QOS_CFG		0xc81
 #define IA32_L3_CBM_BASE	0xc90
 
 /**
@@ -72,7 +90,7 @@ extern struct mutex rdtgroup_mutex;
 
 int __init rdtgroup_init(void);
 
-extern struct rdtgroup *rdtgroup_default;
+extern struct rdtgroup rdtgroup_default;
 extern struct rdt_resource rdt_resources_all[];
 
 enum {
