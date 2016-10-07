@@ -36,6 +36,52 @@ struct kernfs_root *rdt_root;
 struct rdtgroup rdtgroup_default;
 LIST_HEAD(rdt_all_groups);
 
+/*
+ * Trivial allocator for CLOSIDs. Since h/w only supports
+ * a small number, we can keep a bitmap of free CLOSIDs in
+ * a single integer.
+ */
+static int closid_free_map;
+
+static void closid_init(void)
+{
+	closid_free_map = BIT_MASK(rdt_max_closid) - 1;
+
+	/* CLOSID 0 is always reserved for the default group */
+	closid_free_map &= ~1;
+}
+
+int closid_alloc(void)
+{
+	int closid = ffs(closid_free_map);
+
+	if (closid == 0)
+		return -ENOSPC;
+	closid--;
+	closid_free_map &= ~(1 << closid);
+
+	return closid;
+}
+
+static void closid_free(int closid)
+{
+	closid_free_map |= 1 << closid;
+}
+
+static struct rdtgroup *rdtgroup_alloc(void)
+{
+	struct rdtgroup *rdtgrp;
+
+	rdtgrp = kzalloc(sizeof(*rdtgrp), GFP_KERNEL);
+
+	return rdtgrp;
+}
+
+static void rdtgroup_free(struct rdtgroup *rdtgroup)
+{
+	kfree(rdtgroup);
+}
+
 /* set uid and gid of rdtgroup dirs and files to that of the creator */
 static int rdtgroup_kn_set_ugid(struct kernfs_node *kn)
 {
@@ -240,6 +286,54 @@ static int parse_rdtgroupfs_options(char *data, struct rdt_resource *r)
 	return 0;
 }
 
+/*
+ * We don't allow rdtgroup directories to be created anywhere
+ * except the root directory. Thus when looking for the rdtgroup
+ * structure for a kernfs node we are either looking at a directory,
+ * in which case the rdtgroup structure is pointed at by the "priv"
+ * field, otherwise we have a file, and need only look to the parent
+ * to find the rdtgroup.
+ */
+static struct rdtgroup *kernfs_to_rdtgroup(struct kernfs_node *kn)
+{
+	if (kernfs_type(kn) == KERNFS_DIR)
+		return kn->priv;
+	else
+		return kn->parent->priv;
+}
+
+struct rdtgroup *rdtgroup_kn_lock_live(struct kernfs_node *kn)
+{
+	struct rdtgroup *rdtgrp = kernfs_to_rdtgroup(kn);
+
+	atomic_inc(&rdtgrp->waitcount);
+	kernfs_break_active_protection(kn);
+
+	mutex_lock(&rdtgroup_mutex);
+
+	/* Was this group deleted while we waited? */
+	if (rdtgrp->flags & RDT_DELETED)
+		return NULL;
+
+	return rdtgrp;
+}
+
+void rdtgroup_kn_unlock(struct kernfs_node *kn)
+{
+	struct rdtgroup *rdtgrp = kernfs_to_rdtgroup(kn);
+
+	mutex_unlock(&rdtgroup_mutex);
+
+	if (atomic_dec_and_test(&rdtgrp->waitcount) &&
+	    (rdtgrp->flags & RDT_DELETED)) {
+		kernfs_unbreak_active_protection(kn);
+		kernfs_put(kn);
+		kfree(rdtgrp);
+	} else {
+		kernfs_unbreak_active_protection(kn);
+	}
+}
+
 static struct dentry *rdt_mount(struct file_system_type *fs_type,
 				int flags, const char *unused_dev_name,
 				void *data)
@@ -275,6 +369,7 @@ static struct dentry *rdt_mount(struct file_system_type *fs_type,
 		rdt_max_closid = max(rdt_max_closid, r->num_closid);
 	if (rdt_max_closid > 32)
 		rdt_max_closid = 32;
+	closid_init();
 
 	dentry = kernfs_mount(fs_type, flags, rdt_root,
 			      RDTGROUP_SUPER_MAGIC, &new_sb);
@@ -318,6 +413,24 @@ static void reset_all_cbms(struct rdt_resource *r)
 	smp_call_function_many(&cpu_mask, rdt_cbm_update, &msr_param, 1);
 }
 
+/*
+ * Forcibly remove all of subdirectories under root.
+ */
+static void rmdir_all_sub(void)
+{
+	struct rdtgroup *rdtgrp;
+	struct list_head *l, *next;
+
+	list_for_each_safe(l, next, &rdt_all_groups) {
+		rdtgrp = list_entry(l, struct rdtgroup, rdtgroup_list);
+		if (rdtgrp == &rdtgroup_default)
+			continue;
+		kernfs_remove(rdtgrp->kn);
+		list_del(&rdtgrp->rdtgroup_list);
+		rdtgroup_free(rdtgrp);
+	}
+}
+
 static void rdt_kill_sb(struct super_block *sb)
 {
 	struct rdt_resource *r;
@@ -333,6 +446,7 @@ static void rdt_kill_sb(struct super_block *sb)
 		set_l3_qos_cfg(r);
 	}
 
+	rmdir_all_sub();
 	static_branch_disable(&rdt_enable_key);
 	kernfs_kill_sb(sb);
 	mutex_unlock(&rdtgroup_mutex);
@@ -344,7 +458,115 @@ static struct file_system_type rdt_fs_type = {
 	.kill_sb = rdt_kill_sb,
 };
 
+static int rdtgroup_mkdir(struct kernfs_node *parent_kn, const char *name,
+			  umode_t mode)
+{
+	struct rdtgroup *parent, *rdtgrp;
+	struct kernfs_node *kn;
+	int ret, closid;
+
+	/* Only allow mkdir in the root directory */
+	if (parent_kn != rdtgroup_default.kn)
+		return -EPERM;
+
+	/* Do not accept '\n' to avoid unparsable situation. */
+	if (strchr(name, '\n'))
+		return -EINVAL;
+
+	parent = rdtgroup_kn_lock_live(parent_kn);
+	if (!parent) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	ret = closid_alloc();
+	if (ret < 0)
+		goto out_unlock;
+	closid = ret;
+
+	/* allocate the rdtgroup. */
+	rdtgrp = rdtgroup_alloc();
+	if (!rdtgrp) {
+		ret = -ENOSPC;
+		goto out_closid_free;
+	}
+	rdtgrp->closid = closid;
+	list_add(&rdtgrp->rdtgroup_list, &rdt_all_groups);
+
+	/* kernfs creates the directory for rdtgrp */
+	kn = kernfs_create_dir(parent->kn, name, mode, rdtgrp);
+	if (IS_ERR(kn)) {
+		ret = PTR_ERR(kn);
+		goto out_cancel_ref;
+	}
+	rdtgrp->kn = kn;
+
+	/*
+	 * This extra ref will be put in kernfs_remove() and guarantees
+	 * that @rdtgrp->kn is always accessible.
+	 */
+	kernfs_get(kn);
+
+	ret = rdtgroup_kn_set_ugid(kn);
+	if (ret)
+		goto out_destroy;
+
+	kernfs_activate(kn);
+
+	ret = 0;
+	goto out_unlock;
+
+out_destroy:
+	kernfs_remove(rdtgrp->kn);
+out_cancel_ref:
+	rdtgroup_free(rdtgrp);
+out_closid_free:
+	closid_free(closid);
+out_unlock:
+	rdtgroup_kn_unlock(parent_kn);
+	return ret;
+}
+
+static int rdtgroup_rmdir(struct kernfs_node *kn)
+{
+	struct rdtgroup *rdtgrp;
+	int ret = 0;
+
+	rdtgrp = rdtgroup_kn_lock_live(kn);
+	if (!rdtgrp) {
+		rdtgroup_kn_unlock(kn);
+		return -ENOENT;
+	}
+
+	/*
+	 * rmdir is for deleting resource groups. Don't
+	 * allow deletion of "info" or any of its subdirectories
+	 */
+	if (!rdtgrp) {
+		mutex_unlock(&rdtgroup_mutex);
+		kernfs_unbreak_active_protection(kn);
+		return -EPERM;
+	}
+
+	rdtgrp->flags = RDT_DELETED;
+	closid_free(rdtgrp->closid);
+	list_del(&rdtgrp->rdtgroup_list);
+
+	/*
+	 * one extra hold on this, will drop when we kfree(rdtgrp)
+	 * in rdtgroup_kn_unlock()
+	 */
+	kernfs_get(kn);
+	kernfs_remove(rdtgrp->kn);
+
+	rdtgroup_kn_unlock(kn);
+
+	return ret;
+}
+
 static struct kernfs_syscall_ops rdtgroup_kf_syscall_ops = {
+	.mkdir	= rdtgroup_mkdir,
+	.rmdir	= rdtgroup_rmdir,
 };
 
 static int __init rdtgroup_setup_root(void)
