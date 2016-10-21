@@ -79,22 +79,6 @@ acpi_ns_load_table(u32 table_index, struct acpi_namespace_node *node)
 
 	ACPI_FUNCTION_TRACE(ns_load_table);
 
-	acpi_ex_enter_interpreter();
-
-	/*
-	 * Parse the table and load the namespace with all named
-	 * objects found within. Control methods are NOT parsed
-	 * at this time. In fact, the control methods cannot be
-	 * parsed until the entire namespace is loaded, because
-	 * if a control method makes a forward reference (call)
-	 * to another control method, we can't continue parsing
-	 * because we don't know how many arguments to parse next!
-	 */
-	status = acpi_ut_acquire_mutex(ACPI_MTX_NAMESPACE);
-	if (ACPI_FAILURE(status)) {
-		goto unlock_interp;
-	}
-
 	/* If table already loaded into namespace, just return */
 
 	if (acpi_tb_is_table_loaded(table_index)) {
@@ -110,6 +94,15 @@ acpi_ns_load_table(u32 table_index, struct acpi_namespace_node *node)
 		goto unlock;
 	}
 
+	/*
+	 * Parse the table and load the namespace with all named
+	 * objects found within. Control methods are NOT parsed
+	 * at this time. In fact, the control methods cannot be
+	 * parsed until the entire namespace is loaded, because
+	 * if a control method makes a forward reference (call)
+	 * to another control method, we can't continue parsing
+	 * because we don't know how many arguments to parse next!
+	 */
 	status = acpi_ns_parse_table(table_index, node);
 	if (ACPI_SUCCESS(status)) {
 		acpi_tb_set_table_loaded_flag(table_index, TRUE);
@@ -123,7 +116,6 @@ acpi_ns_load_table(u32 table_index, struct acpi_namespace_node *node)
 		 * exist. This target of Scope must already exist in the
 		 * namespace, as per the ACPI specification.
 		 */
-		(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
 		acpi_ns_delete_namespace_by_owner(acpi_gbl_root_table_list.
 						  tables[table_index].owner_id);
 
@@ -132,10 +124,6 @@ acpi_ns_load_table(u32 table_index, struct acpi_namespace_node *node)
 	}
 
 unlock:
-	(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
-unlock_interp:
-	(void)acpi_ex_exit_interpreter();
-
 	if (ACPI_FAILURE(status)) {
 		return_ACPI_STATUS(status);
 	}
@@ -167,7 +155,8 @@ unlock_interp:
 	 * other ACPI implementations. Optionally, the execution can be deferred
 	 * until later, see acpi_initialize_objects.
 	 */
-	if (!acpi_gbl_group_module_level_code) {
+	if (!acpi_gbl_parse_table_as_term_list
+	    && !acpi_gbl_group_module_level_code) {
 		acpi_ns_exec_module_code_list();
 	}
 
