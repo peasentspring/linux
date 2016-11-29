@@ -326,8 +326,10 @@ static void move_myself(struct callback_head *head)
 		kfree(rdtgrp);
 	}
 
+	get_cpu();
 	/* update PQR_ASSOC MSR to make resource group go into effect */
 	intel_rdt_sched_in();
+	put_cpu();
 
 	kfree(callback);
 }

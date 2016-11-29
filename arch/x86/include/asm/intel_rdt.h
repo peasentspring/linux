@@ -192,6 +192,9 @@ int rdtgroup_schemata_show(struct kernfs_open_file *of,
  *   resctrl file system.
  * - Caches the per cpu CLOSid values and does the MSR write only
  *   when a task with a different CLOSid is scheduled in.
+ * - Caller needs to disable preempt before calling this function.
+ *   The function doesn't check preemptible. Scheduler hot path
+ *   disables preempt already.
  */
 static inline void intel_rdt_sched_in(void)
 {
